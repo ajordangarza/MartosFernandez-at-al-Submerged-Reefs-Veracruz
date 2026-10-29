@@ -1,0 +1,188 @@
+library(terra)
+library(sf)
+library(ggplot2)
+library(ggrepel)
+library(scales)
+library(rnaturalearth)
+library(ggspatial)
+
+# -----------------------------------------------------------
+# 1. Descargar batimetría GMRT para la zona norte de Veracruz
+# -----------------------------------------------------------
+west  <- -96.175
+east  <- -96.050
+south <-  19.190
+north <-  19.278
+
+url_gmrt <- paste0(
+  "https://www.gmrt.org/services/GridServer?",
+  "west=", west,
+  "&east=", east,
+  "&south=", south,
+  "&north=", north,
+  "&layer=topo",
+  "&format=geotiff",
+  "&resolution=max"
+)
+
+download.file(url_gmrt, "batimetria_GMRT_Veracruz.tif",
+              mode = "wb", quiet = TRUE)
+
+# -----------------------------------------------------------
+# 2. Preparar profundidad e isóbatas
+# -----------------------------------------------------------
+batimetria <- rast("batimetria_GMRT_Veracruz.tif")
+
+# Proyección UTM zona 14N para trabajar en metros
+batimetria_utm <- project(batimetria, "EPSG:32614")
+
+# GMRT registra el fondo marino como elevación negativa.
+# Se convierte a profundidad positiva y se conservan 0–100 m.
+profundidad <- -batimetria_utm
+profundidad[profundidad < 0] <- NA
+profundidad[profundidad > 100] <- 100
+
+# Raster a tabla para ggplot
+bat_df <- as.data.frame(profundidad, xy = TRUE, na.rm = TRUE)
+names(bat_df)[3] <- "profundidad"
+
+# Isóbatas cada 5 m
+isobatas <- as.contour(
+  profundidad,
+  levels = seq(0, 100, by = 5)
+)
+
+isobatas_sf <- st_as_sf(isobatas)
+
+# -----------------------------------------------------------
+# 3. Costa continental
+# -----------------------------------------------------------
+mexico <- ne_countries(
+  country = "Mexico",
+  scale = "medium",
+  returnclass = "sf"
+)
+
+mexico_utm <- st_transform(mexico, 32614)
+
+# Recortar la costa a la extensión del raster
+caja <- st_as_sfc(st_bbox(profundidad), crs = 32614)
+costa <- st_intersection(mexico_utm, caja)
+
+# -----------------------------------------------------------
+# 4. Ubicación de los arrecifes sumergidos
+# Coordenadas UTM aproximadas; sustituye por las coordenadas
+# exactas de tus polígonos o centroides, si las tienes.
+# -----------------------------------------------------------
+arrecifes <- data.frame(
+  sitio = c("Ahogado de Punta Gorda", "Verde", "Las Cruces",
+            "Ahogado de Gallega", "Holandesas 1",
+            "Holandesas 2", "Holandesas 3"),
+  etiqueta = 1:7,
+  Este = c(797700, 802300, 801600, 802950, 805000, 806000, 807250),
+  Norte = c(2131800, 2132650, 2129400, 2127500, 2131300, 2130000, 2129300)
+)
+
+arrecifes_sf <- st_as_sf(
+  arrecifes,
+  coords = c("Este", "Norte"),
+  crs = 32614
+)
+
+arrecifes_xy <- cbind(
+  arrecifes,
+  st_coordinates(arrecifes_sf)
+)
+
+# -----------------------------------------------------------
+# 5. Mapa final
+# -----------------------------------------------------------
+pal_batimetria <- c(
+  "#FFF4BD", "#BDE5D5", "#64B5CC",
+  "#2676A5", "#153B67"
+)
+
+mapa_batimetria <- ggplot() +
+  
+  geom_raster(
+    data = bat_df,
+    aes(x = x, y = y, fill = profundidad)
+  ) +
+  
+  geom_sf(
+    data = costa,
+    fill = "grey80",
+    colour = NA
+  ) +
+  
+  geom_sf(
+    data = isobatas_sf,
+    colour = "black",
+    linewidth = 0.30,
+    alpha = 0.85
+  ) +
+  
+  geom_sf(
+    data = arrecifes_sf,
+    shape = 21,
+    size = 3,
+    fill = "#F4A6BF",
+    colour = "#8B3658",
+    stroke = 0.5
+  ) +
+  
+  geom_label_repel(
+    data = arrecifes_xy,
+    aes(x = X, y = Y, label = etiqueta),
+    size = 4.5,
+    fontface = "bold",
+    fill = "white",
+    colour = "black",
+    label.size = 0.3,
+    min.segment.length = 0,
+    box.padding = 0.15,
+    point.padding = 0.2,
+    seed = 24
+  ) +
+  
+  scale_fill_gradientn(
+    colours = pal_batimetria,
+    values = rescale(c(0, 20, 40, 70, 100)),
+    limits = c(0, 100),
+    oob = squish,
+    name = "Depth (m)"
+  ) +
+  
+  coord_sf(
+    crs = st_crs(32614),
+    expand = FALSE
+  ) +
+  
+  labs(
+    x = "Longitude (west)",
+    y = "Latitude (north)"
+  ) +
+  
+  annotation_scale(
+    location = "bl",
+    width_hint = 0.25
+  ) +
+  
+  theme_bw(base_family = "Arial") +
+  theme(
+    panel.grid = element_blank(),
+    axis.title = element_text(face = "bold", size = 13),
+    axis.text = element_text(size = 11),
+    legend.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+mapa_batimetria
+
+ggsave(
+  "batimetria_arrecifes_sumergidos_Veracruz.png",
+  mapa_batimetria,
+  width = 10,
+  height = 7,
+  dpi = 600
+)
